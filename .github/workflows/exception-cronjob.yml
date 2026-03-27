@@ -1,0 +1,136 @@
+name: Exception Triage
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  top-errors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: >-
+            {"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}
+
+      - name: Ensure Log Analytics extension
+        run: az extension add --name log-analytics --upgrade
+
+      - name: Query top 3 critical errors (last 24h)
+        env:
+          LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          KUSTO_QUERY=$(cat <<'KQL'
+          union isfuzzy=true withsource=TableName *
+          | where TimeGenerated >= ago(24h)
+          | extend SeverityText = tostring(column_ifexists("Level", "")),
+                   SeverityNum = toint(column_ifexists("SeverityLevel", int(null))),
+                   Message = trim(@" \t\r\n", coalesce(
+                     tostring(column_ifexists("RenderedDescription", "")),
+                     tostring(column_ifexists("ExceptionMessage", "")),
+                     tostring(column_ifexists("Message", "")),
+                     tostring(column_ifexists("msg_s", "")),
+                     tostring(column_ifexists("operation_Name", ""))
+                   )),
+                   StatusCode = toint(column_ifexists("StatusCode", int(null)))
+          | where Message != ""
+          | where SeverityText has_any ("Critical", "Error", "Fatal")
+             or SeverityNum >= 3
+             or StatusCode >= 500
+          | extend SeverityRank = case(SeverityText has "Critical" or SeverityNum >= 4, 2, 1)
+          | summarize
+              Occurrences = count(),
+              LastSeen = max(TimeGenerated),
+              SampleMessage = any(Message),
+              SourceTables = make_set(TableName, 3)
+            by Signature = substring(Message, 0, 180), SeverityRank
+          | top 3 by SeverityRank desc, Occurrences desc, LastSeen desc
+          | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables
+          KQL
+          )
+
+          az monitor log-analytics query \
+            --workspace "$LOG_ANALYTICS_WORKSPACE_ID" \
+            --analytics-query "$KUSTO_QUERY" \
+            --output json > top_errors.json
+
+          if [ ! -s top_errors.json ]; then
+            echo "No matching errors found in the last 24 hours."
+          fi
+
+      - name: Create tasks for top 3 findings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s top_errors.json ]; then
+            echo "No tasks created because no matching errors were found."
+            exit 0
+          fi
+
+          row_count=$(jq -r '(.tables[0].rows // []) | length' top_errors.json)
+          if [ "$row_count" -eq 0 ]; then
+            echo "No tasks created because no matching errors were found."
+            exit 0
+          fi
+
+          idx=0
+          jq -c '
+            .tables[0] as $t
+            | $t.rows[]
+            | {
+                severity: .[0],
+                occurrences: .[1],
+                last_seen: .[2],
+                signature: .[3],
+                sample_message: .[4],
+                source_tables: .[5]
+              }
+          ' top_errors.json | while IFS= read -r row; do
+            signature=$(jq -r '.signature // ""' <<<"$row")
+            [ -n "$signature" ] || continue
+            idx=$((idx + 1))
+
+            severity=$(jq -r '.severity // 1' <<<"$row")
+            occurrences=$(jq -r '.occurrences // 0' <<<"$row")
+            last_seen=$(jq -r '.last_seen // ""' <<<"$row")
+            sample_message=$(jq -r '.sample_message // ""' <<<"$row")
+            source_tables=$(jq -c '.source_tables // []' <<<"$row")
+
+            if [ "$severity" = "2" ]; then
+              severity_text="Critical"
+            else
+              severity_text="Error"
+            fi
+
+            title="[Auto][Log Analytics] ${severity_text} finding #${idx} - ${signature}"
+
+            body=$(cat <<EOF
+          Automated task created from Azure Log Analytics (last 24h).
+
+          - Severity: ${severity_text}
+          - Occurrences: ${occurrences}
+          - Last seen (UTC): ${last_seen}
+          - Workspace ID: ${LOG_ANALYTICS_WORKSPACE_ID}
+          - Source tables: ${source_tables}
+
+          Sample message:
+          ${sample_message}
+          EOF
+            )
+
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$title" \
+              --body "$body"
+
+          done
