@@ -12,6 +12,11 @@ jobs:
   top-errors:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Azure login
         uses: azure/login@v2
         with:
@@ -21,49 +26,26 @@ jobs:
       - name: Ensure Log Analytics extension
         run: az extension add --name log-analytics --upgrade
 
-      - name: Query top 3 critical errors (last 24h)
+      - name: Query top 3 exceptions (last 24h)
         env:
           LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
         run: |
           set -euo pipefail
 
           KUSTO_QUERY=$(cat <<'KQL'
-          union isfuzzy=true withsource=TableName AppExceptions, exceptions
-          | extend EventTime = todatetime(coalesce(
-              column_ifexists("timestamp", datetime(null)),
-              column_ifexists("TimeGenerated", datetime(null))
-            ))
-          | where isnotnull(EventTime)
-          | where EventTime > ago(24h)
-          | extend ProblemId = tostring(coalesce(
-                     column_ifexists("problemId", ""),
-                     column_ifexists("ProblemId", "")
-                   )),
-                   ExceptionType = tostring(coalesce(
-                     column_ifexists("type", ""),
-                     column_ifexists("Type", ""),
-                     column_ifexists("ExceptionType", "")
-                   )),
-                   OuterMessage = trim(@" \t\r\n", tostring(coalesce(
-                     column_ifexists("outerMessage", ""),
-                     column_ifexists("OuterMessage", ""),
-                     column_ifexists("innermostMessage", ""),
-                     column_ifexists("InnermostMessage", ""),
-                     column_ifexists("message", ""),
-                     column_ifexists("Message", "")
-                   ))),
-                   Signature = substring(iff(isempty(OuterMessage), ExceptionType, OuterMessage), 0, 180)
-          | where not(isempty(Signature))
+          exceptions
+          | where timestamp > ago(24h)
           | summarize
               Occurrences = count(),
-              LastSeen = max(EventTime),
-              SampleMessage = any(OuterMessage),
-              SourceTables = make_set(TableName, 3)
-            by ProblemId, ExceptionType, Signature
+              LastSeen = max(timestamp),
+              SampleMessage = any(tostring(outerMessage))
+            by ProblemId = tostring(problemId), ExceptionType = tostring(type), Signature = substring(tostring(outerMessage), 0, 180)
+          | extend Signature = iff(isempty(Signature), ExceptionType, Signature)
+          | where not(isempty(Signature))
           | extend SeverityRank = 2
           | sort by SeverityRank desc, Occurrences desc, LastSeen desc
           | take 3
-          | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables
+          | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables = dynamic(["exceptions"]), ProblemId, ExceptionType
           KQL
           )
 
@@ -76,89 +58,43 @@ jobs:
             echo "No matching errors found in the last 24 hours."
           fi
 
-      - name: Create tasks for top 3 findings
+      - name: Create tasks for top 3 findings with Claude
+        uses: anthropics/claude-code-action@v1
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
           LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
-        run: |
-          set -euo pipefail
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_FOUNDRY_API_KEY }}
+          claude_args: |
+            --model claude-sonnet-4-6
+            --dangerously-skip-permissions
+          prompt: |
+            Read ./top_errors.json and create up to 3 separate GitHub issues in this repository, one issue per top finding.
 
-          if [ ! -s top_errors.json ]; then
-            echo "No tasks created because no matching errors were found."
-            exit 0
-          fi
+            Requirements:
+            - If top_errors.json is missing, empty, or has zero rows: do not create issues and return a short explanation.
+            - Support Azure CLI response formats where rows may be under:
+              - .tables[0].rows
+              - .Tables[0].Rows
+              - .[0].rows
+              - .[0].Rows
+            - Row mapping is:
+              [0]=SeverityRank, [1]=Occurrences, [2]=LastSeen, [3]=Signature, [4]=SampleMessage, [5]=SourceTables, [6]=ProblemId, [7]=ExceptionType
+            - Create at most 3 issues.
+            - Use title format:
+              [Auto][Log Analytics] Critical finding #<n> - <Signature>
+            - Use body format:
+              Automated task created from Azure Log Analytics (last 24h).
 
-          row_count=$(jq -r '
-            def rows:
-              if type == "object" then
-                (.tables[0].rows // .Tables[0].Rows // [])
-              elif type == "array" then
-                (.[0].rows // .[0].Rows // [])
-              else
-                []
-              end;
-            rows | length
-          ' top_errors.json)
-          if [ "$row_count" -eq 0 ]; then
-            echo "No tasks created because no matching errors were found."
-            exit 0
-          fi
+              - Severity: Critical
+              - Occurrences: <Occurrences>
+              - Last seen (UTC): <LastSeen>
+              - Workspace ID: ${LOG_ANALYTICS_WORKSPACE_ID}
+              - Problem ID: <ProblemId>
+              - Exception type: <ExceptionType>
+              - Source tables: <SourceTables>
 
-          idx=0
-          jq -c '
-            def rows:
-              if type == "object" then
-                (.tables[0].rows // .Tables[0].Rows // [])
-              elif type == "array" then
-                (.[0].rows // .[0].Rows // [])
-              else
-                []
-              end;
-            rows[]
-            | {
-                severity: .[0],
-                occurrences: .[1],
-                last_seen: .[2],
-                signature: .[3],
-                sample_message: .[4],
-                source_tables: .[5]
-              }
-          ' top_errors.json | while IFS= read -r row; do
-            signature=$(jq -r '.signature // ""' <<<"$row")
-            [ -n "$signature" ] || continue
-            idx=$((idx + 1))
+              Sample message:
+              <SampleMessage>
 
-            severity=$(jq -r '.severity // 1' <<<"$row")
-            occurrences=$(jq -r '.occurrences // 0' <<<"$row")
-            last_seen=$(jq -r '.last_seen // ""' <<<"$row")
-            sample_message=$(jq -r '.sample_message // ""' <<<"$row")
-            source_tables=$(jq -c '.source_tables // []' <<<"$row")
-
-            if [ "$severity" = "2" ]; then
-              severity_text="Critical"
-            else
-              severity_text="Error"
-            fi
-
-            title="[Auto][Log Analytics] ${severity_text} finding #${idx} - ${signature}"
-
-            body=$(cat <<EOF
-          Automated task created from Azure Log Analytics (last 24h).
-
-          - Severity: ${severity_text}
-          - Occurrences: ${occurrences}
-          - Last seen (UTC): ${last_seen}
-          - Workspace ID: ${LOG_ANALYTICS_WORKSPACE_ID}
-          - Source tables: ${source_tables}
-
-          Sample message:
-          ${sample_message}
-          EOF
-            )
-
-            gh issue create \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$title" \
-              --body "$body"
-
-          done
+            Use GitHub CLI (`gh issue create`) and print the created issue URLs at the end.
