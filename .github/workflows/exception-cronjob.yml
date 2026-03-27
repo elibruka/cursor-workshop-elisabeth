@@ -26,38 +26,6 @@ jobs:
       - name: Ensure Log Analytics extension
         run: az extension add --name log-analytics --upgrade
 
-      - name: Query top 3 exceptions (last 24h)
-        env:
-          LOG_ANALYTICS_WORKSPACE_ID: ${{ vars.LOG_ANALYTICS_WORKSPACE_ID }}
-        run: |
-          set -euo pipefail
-
-          KUSTO_QUERY=$(cat <<'KQL'
-          exceptions
-          | where timestamp > ago(24h)
-          | summarize
-              Occurrences = count(),
-              LastSeen = max(timestamp),
-              SampleMessage = any(tostring(outerMessage))
-            by ProblemId = tostring(problemId), ExceptionType = tostring(type), Signature = substring(tostring(outerMessage), 0, 180)
-          | extend Signature = iff(isempty(Signature), ExceptionType, Signature)
-          | where not(isempty(Signature))
-          | extend SeverityRank = 2
-          | sort by SeverityRank desc, Occurrences desc, LastSeen desc
-          | take 3
-          | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables = dynamic(["exceptions"]), ProblemId, ExceptionType
-          KQL
-          )
-
-          az monitor log-analytics query \
-            --workspace "$LOG_ANALYTICS_WORKSPACE_ID" \
-            --analytics-query "$KUSTO_QUERY" \
-            --output json > top_errors.json
-
-          if [ ! -s top_errors.json ]; then
-            echo "No matching errors found in the last 24 hours."
-          fi
-
       - name: Create tasks for top 3 findings with Claude
         uses: anthropics/claude-code-action@v1
         env:
