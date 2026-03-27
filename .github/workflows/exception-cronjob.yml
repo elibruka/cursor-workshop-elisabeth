@@ -80,7 +80,17 @@ jobs:
             exit 0
           fi
 
-          row_count=$(jq -r '(.tables[0].rows // []) | length' top_errors.json)
+          row_count=$(jq -r '
+            def rows:
+              if type == "object" then
+                (.tables[0].rows // .Tables[0].Rows // [])
+              elif type == "array" then
+                (.[0].rows // .[0].Rows // [])
+              else
+                []
+              end;
+            rows | length
+          ' top_errors.json)
           if [ "$row_count" -eq 0 ]; then
             echo "No tasks created because no matching errors were found."
             exit 0
@@ -88,8 +98,15 @@ jobs:
 
           idx=0
           jq -c '
-            .tables[0] as $t
-            | $t.rows[]
+            def rows:
+              if type == "object" then
+                (.tables[0].rows // .Tables[0].Rows // [])
+              elif type == "array" then
+                (.[0].rows // .[0].Rows // [])
+              else
+                []
+              end;
+            rows[]
             | {
                 severity: .[0],
                 occurrences: .[1],
