@@ -10,8 +10,11 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      issues: write
+      pull-requests: write
     steps:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_FOUNDRY_API_KEY }}
+          github_token: ${{ github.token }}
           # Responds to @claude mentions in comments
