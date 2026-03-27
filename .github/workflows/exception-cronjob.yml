@@ -28,31 +28,19 @@ jobs:
           set -euo pipefail
 
           KUSTO_QUERY=$(cat <<'KQL'
-          union isfuzzy=true withsource=TableName *
-          | extend EventTime = todatetime(column_ifexists("TimeGenerated", datetime(null))),
-                   SeverityText = tostring(column_ifexists("Level", "")),
-                   SeverityNum = toint(column_ifexists("SeverityLevel", int(null))),
-                   Message = trim(@" \t\r\n", coalesce(
-                     tostring(column_ifexists("RenderedDescription", "")),
-                     tostring(column_ifexists("ExceptionMessage", "")),
-                     tostring(column_ifexists("Message", "")),
-                     tostring(column_ifexists("msg_s", "")),
-                     tostring(column_ifexists("operation_Name", ""))
-                   )),
-                   StatusCode = toint(column_ifexists("StatusCode", int(null)))
-          | where isnotnull(EventTime)
-          | where EventTime >= ago(24h)
-          | where Message != ""
-          | where SeverityText has_any ("Critical", "Error", "Fatal")
-             or SeverityNum >= 3
-             or StatusCode >= 500
-          | extend SeverityRank = case(SeverityText has "Critical" or SeverityNum >= 4, 2, 1)
+          exceptions
+          | where timestamp > ago(24h)
+          | extend ProblemId = tostring(problemId),
+                   ExceptionType = tostring(type),
+                   OuterMessage = trim(@" \t\r\n", tostring(outerMessage)),
+                   Signature = substring(iff(isempty(OuterMessage), ExceptionType, OuterMessage), 0, 180)
           | summarize
               Occurrences = count(),
-              LastSeen = max(EventTime),
-              SampleMessage = any(Message),
-              SourceTables = make_set(TableName, 3)
-            by Signature = substring(Message, 0, 180), SeverityRank
+              LastSeen = max(timestamp),
+              SampleMessage = any(OuterMessage),
+              SourceTables = dynamic(["exceptions"])
+            by ProblemId, ExceptionType, Signature
+          | extend SeverityRank = 2
           | sort by SeverityRank desc, Occurrences desc, LastSeen desc
           | take 3
           | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables
