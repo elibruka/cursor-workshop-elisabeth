@@ -51,7 +51,8 @@ jobs:
               SampleMessage = any(Message),
               SourceTables = make_set(TableName, 3)
             by Signature = substring(Message, 0, 180), SeverityRank
-          | top 3 by SeverityRank desc, Occurrences desc, LastSeen desc
+          | sort by SeverityRank desc, Occurrences desc, LastSeen desc
+          | take 3
           | project SeverityRank, Occurrences, LastSeen, Signature, SampleMessage, SourceTables
           KQL
           )
