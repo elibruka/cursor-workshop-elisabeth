@@ -28,17 +28,37 @@ jobs:
           set -euo pipefail
 
           KUSTO_QUERY=$(cat <<'KQL'
-          exceptions
-          | where timestamp > ago(24h)
-          | extend ProblemId = tostring(problemId),
-                   ExceptionType = tostring(type),
-                   OuterMessage = trim(@" \t\r\n", tostring(outerMessage)),
+          union isfuzzy=true withsource=TableName AppExceptions, exceptions
+          | extend EventTime = todatetime(coalesce(
+              column_ifexists("timestamp", datetime(null)),
+              column_ifexists("TimeGenerated", datetime(null))
+            ))
+          | where isnotnull(EventTime)
+          | where EventTime > ago(24h)
+          | extend ProblemId = tostring(coalesce(
+                     column_ifexists("problemId", ""),
+                     column_ifexists("ProblemId", "")
+                   )),
+                   ExceptionType = tostring(coalesce(
+                     column_ifexists("type", ""),
+                     column_ifexists("Type", ""),
+                     column_ifexists("ExceptionType", "")
+                   )),
+                   OuterMessage = trim(@" \t\r\n", tostring(coalesce(
+                     column_ifexists("outerMessage", ""),
+                     column_ifexists("OuterMessage", ""),
+                     column_ifexists("innermostMessage", ""),
+                     column_ifexists("InnermostMessage", ""),
+                     column_ifexists("message", ""),
+                     column_ifexists("Message", "")
+                   ))),
                    Signature = substring(iff(isempty(OuterMessage), ExceptionType, OuterMessage), 0, 180)
+          | where not(isempty(Signature))
           | summarize
               Occurrences = count(),
-              LastSeen = max(timestamp),
+              LastSeen = max(EventTime),
               SampleMessage = any(OuterMessage),
-              SourceTables = dynamic(["exceptions"])
+              SourceTables = make_set(TableName, 3)
             by ProblemId, ExceptionType, Signature
           | extend SeverityRank = 2
           | sort by SeverityRank desc, Occurrences desc, LastSeen desc
