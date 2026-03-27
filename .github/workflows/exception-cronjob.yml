@@ -38,7 +38,7 @@ jobs:
             --model claude-sonnet-4-6
             --dangerously-skip-permissions
           prompt: |
-            Read ./top_errors.json and create up to 3 separate GitHub issues in this repository, one issue per top finding.
+            Read exceptions from Log Analytics and create up to 3 separate GitHub issues in this repository, one issue per top finding.
 
             Use this Log Analytics command as the reference query:
             ```bash
@@ -49,14 +49,6 @@ jobs:
             ```
 
             Requirements:
-            - If top_errors.json is missing, empty, or has zero rows: do not create issues and return a short explanation.
-            - Support Azure CLI response formats where rows may be under:
-              - .tables[0].rows
-              - .Tables[0].Rows
-              - .[0].rows
-              - .[0].Rows
-            - Row mapping is:
-              [0]=SeverityRank, [1]=Occurrences, [2]=LastSeen, [3]=Signature, [4]=SampleMessage, [5]=SourceTables, [6]=ProblemId, [7]=ExceptionType
             - Create at most 3 issues.
             - Use title format:
               [Auto][Log Analytics] Critical finding #<n> - <Signature>
