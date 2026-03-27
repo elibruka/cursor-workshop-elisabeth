@@ -1,4 +1,5 @@
 import { Page } from "@/components/Page";
+import { Banner } from "@/components/Banner";
 import { getPosts, Post } from "@/clients/api";
 import { Layout } from "@snokam/core";
 import { LayoutTheme, Padding, TransitionType } from "@snokam/core/layout";
@@ -19,6 +20,11 @@ export const getServerSideProps: GetServerSideProps<HomePageProps> = async () =>
 
 const HomePage = ({ post }: HomePageProps) => (
   <Page>
+    <Banner
+      title="Cursor Workshop"
+      subtitle="Utforsk AI-assistert utvikling og bygg fremtiden raskere enn noensinne."
+      badge="Workshop"
+    />
     <Layout.Container
       theme={LayoutTheme.Light}
       transitions={{
@@ -29,7 +35,6 @@ const HomePage = ({ post }: HomePageProps) => (
     >
       <Layout.Content>
         <Layout.Section padding={{ bottom: Padding.Large }}>
-          <h1>Cursor Workshop</h1>
           {post ? (
             <>
               <h3>{post.title}</h3>
