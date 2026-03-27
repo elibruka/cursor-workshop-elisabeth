@@ -19,8 +19,7 @@ jobs:
           fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_FOUNDRY_BASE_URL != '' && '' || secrets.ANTHROPIC_API_KEY }}
-          use_foundry: ${{ secrets.ANTHROPIC_FOUNDRY_BASE_URL != '' && 'true' || 'false' }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Responds to @claude mentions in comments
         env:
-          ANTHROPIC_FOUNDRY_BASE_URL: ${{ secrets.ANTHROPIC_FOUNDRY_BASE_URL }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
